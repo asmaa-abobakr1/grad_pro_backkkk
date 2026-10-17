@@ -52,6 +52,48 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+// ── MongoDB connection (works for both serverless & traditional) ───────────────
+let connectingPromise = null;
+
+const connectDB = async () => {
+  if (mongoose.connection.readyState >= 1) return;
+  if (connectingPromise) return connectingPromise;
+
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (!uri) {
+    console.error('❌ MONGODB_URI not defined in environment variables');
+    return;
+  }
+
+  connectingPromise = mongoose.connect(uri, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+  }).then(() => {
+    console.log('✅ Connected to MongoDB Atlas');
+    connectingPromise = null;
+  }).catch((err) => {
+    console.error('❌ MongoDB connection failed:', err.message);
+    connectingPromise = null;
+    throw err;
+  });
+
+  return connectingPromise;
+};
+
+// Start eager connection
+connectDB().catch(() => {});
+
+// Connect on every serverless cold start BEFORE routes
+app.use(async (_req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('DB middleware error:', err.message);
+    res.status(500).json({ success: false, message: 'Database connection failed: ' + err.message });
+  }
+});
+
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',       authRoutes);
 app.use('/api/products',   productRoutes);
@@ -62,12 +104,14 @@ app.use('/api/analytics',  analyticsRoutes);
 app.use('/api/upload',     uploadRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   res.json({
-    status:    'OK',
-    message:   'Volt API is running 🚀',
-    timestamp: new Date().toISOString(),
-    uptime:    Math.floor(process.uptime()),
+    status:      'OK',
+    message:     'Volt API is running 🚀',
+    dbState:     mongoose.connection.readyState,
+    hasMongoUri: !!(process.env.MONGODB_URI || process.env.MONGO_URI),
+    timestamp:   new Date().toISOString(),
+    uptime:      Math.floor(process.uptime()),
   });
 });
 
@@ -96,35 +140,13 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-// ── MongoDB connection (works for both serverless & traditional) ───────────────
-const connectDB = async () => {
-  if (mongoose.connection.readyState >= 1) return; // already connected
-  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
-  if (!uri) { console.error('❌ MONGODB_URI not defined'); return; }
-  try {
-    await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
-    });
-    console.log('✅ Connected to MongoDB Atlas');
-  } catch (err) {
-    console.error('❌ MongoDB connection failed:', err.message);
-  }
-};
-
-// Connect on every serverless cold start
-app.use(async (_req, _res, next) => {
-  await connectDB();
-  next();
-});
-
 // Start server locally (not on Vercel)
 if (!process.env.VERCEL) {
   connectDB().then(() => {
     app.listen(PORT, () => {
       console.log(`🚀 Volt API running on http://localhost:${PORT}`);
     });
-  });
+  }).catch(() => {});
 }
 
 // Graceful shutdown
