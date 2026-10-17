@@ -117,26 +117,49 @@ app.use((err, _req, res, _next) => {
 // ─── Connect to MongoDB & start server ───────────────────────────────────────
 const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 
-if (!MONGO_URI) {
+if (!MONGO_URI && !process.env.VERCEL) {
   console.error('❌ MONGODB_URI is not defined in .env');
   process.exit(1);
 }
 
-mongoose
-  .connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS:          45000,
-  })
-  .then(() => {
+const connectDB = async () => {
+  if (mongoose.connection.readyState >= 1) return;
+  if (!MONGO_URI) {
+    console.error('❌ MONGODB_URI is not defined in environment variables');
+    return;
+  }
+  try {
+    await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS:          45000,
+    });
     console.log('✅ Connected to MongoDB Atlas');
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err.message);
+    if (!process.env.VERCEL) {
+      process.exit(1);
+    }
+  }
+};
+
+// Ensure database connection for serverless requests
+app.use(async (_req, _res, next) => {
+  if (mongoose.connection.readyState === 0) {
+    await connectDB();
+  }
+  next();
+});
+
+// Run server locally
+if (!process.env.VERCEL) {
+  connectDB().then(() => {
     app.listen(PORT, () => {
       console.log(`🚀 Volt API running on http://localhost:${PORT}`);
     });
-  })
-  .catch((err) => {
-    console.error('❌ MongoDB connection failed:', err.message);
-    process.exit(1);
   });
+} else {
+  connectDB();
+}
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGINT', async () => {
@@ -144,3 +167,5 @@ process.on('SIGINT', async () => {
   console.log('MongoDB connection closed. Server shutting down.');
   process.exit(0);
 });
+
+export default app;
