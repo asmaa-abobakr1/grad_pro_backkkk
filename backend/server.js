@@ -6,15 +6,12 @@ import dns from 'dns';
 
 dotenv.config();
 
-// ─── Fix: Windows / ISP DNS blocking MongoDB Atlas SRV lookups ────────────────
-try {
-  dns.setServers(['8.8.8.8', '1.1.1.1']);
-} catch { /* ignore in environments where this isn't supported */ }
+// Fix DNS for MongoDB Atlas on Windows
+try { dns.setServers(['8.8.8.8', '1.1.1.1']); } catch {}
 
-// ─── Mongoose global settings ─────────────────────────────────────────────────
-mongoose.set('strictQuery', false); // Mongoose v7+ compatibility
+mongoose.set('strictQuery', false);
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────────────
 import authRoutes      from './routes/auth.js';
 import productRoutes   from './routes/products.js';
 import categoryRoutes  from './routes/categories.js';
@@ -26,30 +23,28 @@ import uploadRoutes    from './routes/upload.js';
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
-const allowedOrigins = [
-  process.env.CLIENT_URL || 'http://localhost:5173',
-  'http://localhost:3000',
-  'http://localhost:4173',
-].filter(Boolean);
-
+// ── CORS ─────────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`CORS: origin "${origin}" not allowed.`));
-    }
+    // Allow no-origin requests (Postman, mobile apps, same-origin)
+    if (!origin) return callback(null, true);
+    // Allow localhost in dev
+    if (origin.includes('localhost')) return callback(null, true);
+    // Allow any vercel.app subdomain
+    if (origin.endsWith('.vercel.app')) return callback(null, true);
+    // Allow explicit CLIENT_URL from env
+    if (process.env.CLIENT_URL && origin === process.env.CLIENT_URL) return callback(null, true);
+    // Block everything else
+    return callback(new Error(`CORS: origin "${origin}" not allowed`));
   },
   credentials: true,
 }));
 
-// ─── Body parsers ─────────────────────────────────────────────────────────────
+// ── Body parsers ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ─── Request logger (dev only) ────────────────────────────────────────────────
+// ── Request logger (dev only) ─────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'production') {
   app.use((req, _res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
@@ -57,7 +52,7 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// ─── API Routes ───────────────────────────────────────────────────────────────
+// ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',       authRoutes);
 app.use('/api/products',   productRoutes);
 app.use('/api/categories', categoryRoutes);
@@ -66,7 +61,7 @@ app.use('/api/users',      userRoutes);
 app.use('/api/analytics',  analyticsRoutes);
 app.use('/api/upload',     uploadRoutes);
 
-// ─── Health check ─────────────────────────────────────────────────────────────
+// ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
     status:    'OK',
@@ -76,95 +71,65 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-// ─── 404 catch-all ────────────────────────────────────────────────────────────
+// ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => {
   res.status(404).json({ success: false, message: 'Route not found.' });
 });
 
-// ─── Global error handler ─────────────────────────────────────────────────────
-// eslint-disable-next-line no-unused-vars
+// ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, _req, res, _next) => {
   console.error('❌ Server Error:', err);
-
-  // Mongoose validation error
   if (err.name === 'ValidationError') {
-    const messages = Object.values(err.errors).map((e) => e.message);
+    const messages = Object.values(err.errors).map(e => e.message);
     return res.status(400).json({ success: false, message: messages.join(' ') });
   }
-
-  // Mongoose duplicate key
   if (err.code === 11000) {
     const field = Object.keys(err.keyValue || {})[0] || 'field';
     return res.status(409).json({ success: false, message: `Duplicate value for ${field}.` });
   }
-
-  // Mongoose cast error (invalid ObjectId etc.)
   if (err.name === 'CastError') {
     return res.status(400).json({ success: false, message: `Invalid ${err.path}: ${err.value}.` });
   }
-
-  // CORS error
-  if (err.message?.startsWith('CORS:')) {
-    return res.status(403).json({ success: false, message: err.message });
-  }
-
   res.status(err.status || 500).json({
     success: false,
     message: process.env.NODE_ENV === 'production' ? 'Internal server error.' : err.message,
   });
 });
 
-// ─── Connect to MongoDB & start server ───────────────────────────────────────
-const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
-
-if (!MONGO_URI && !process.env.VERCEL) {
-  console.error('❌ MONGODB_URI is not defined in .env');
-  process.exit(1);
-}
-
+// ── MongoDB connection (works for both serverless & traditional) ───────────────
 const connectDB = async () => {
-  if (mongoose.connection.readyState >= 1) return;
-  if (!MONGO_URI) {
-    console.error('❌ MONGODB_URI is not defined in environment variables');
-    return;
-  }
+  if (mongoose.connection.readyState >= 1) return; // already connected
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (!uri) { console.error('❌ MONGODB_URI not defined'); return; }
   try {
-    await mongoose.connect(MONGO_URI, {
+    await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS:          45000,
+      socketTimeoutMS: 45000,
     });
     console.log('✅ Connected to MongoDB Atlas');
   } catch (err) {
     console.error('❌ MongoDB connection failed:', err.message);
-    if (!process.env.VERCEL) {
-      process.exit(1);
-    }
   }
 };
 
-// Ensure database connection for serverless requests
+// Connect on every serverless cold start
 app.use(async (_req, _res, next) => {
-  if (mongoose.connection.readyState === 0) {
-    await connectDB();
-  }
+  await connectDB();
   next();
 });
 
-// Run server locally
+// Start server locally (not on Vercel)
 if (!process.env.VERCEL) {
   connectDB().then(() => {
     app.listen(PORT, () => {
       console.log(`🚀 Volt API running on http://localhost:${PORT}`);
     });
   });
-} else {
-  connectDB();
 }
 
-// ─── Graceful shutdown ────────────────────────────────────────────────────────
+// Graceful shutdown
 process.on('SIGINT', async () => {
   await mongoose.connection.close();
-  console.log('MongoDB connection closed. Server shutting down.');
   process.exit(0);
 });
 
